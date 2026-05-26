@@ -1,0 +1,9 @@
+{
+  "go.useLanguageServer": true,
+  "editor.formatOnSave": true,
+  "[go]": {
+    "editor.defaultFormatter": "golang.go"
+  },
+  "go.lintTool": "staticcheck",
+  "go.testFlags": ["-v"]
+}

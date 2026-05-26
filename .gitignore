@@ -1,0 +1,4 @@
+/books/**
+!/books/.gitkeep
+opds-server
+opds-server.exe
