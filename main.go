@@ -244,7 +244,14 @@ func handleBooksList(w http.ResponseWriter, r *http.Request, query string) {
 }
 
 func handleDownload(w http.ResponseWriter, r *http.Request) {
-	rawName := strings.TrimPrefix(r.URL.Path, "/books/")
+	// Usa RawPath quando disponível para evitar dupla-decodificação de caracteres
+	// como %C3%A7 (ç), %20 (espaço), etc. O proxy do Readest repassa a URL
+	// encoded — se usarmos r.URL.Path o Go já terá decodificado uma vez.
+	rawPath := r.URL.RawPath
+	if rawPath == "" {
+		rawPath = r.URL.Path
+	}
+	rawName := strings.TrimPrefix(rawPath, "/books/")
 	filename, err := url.PathUnescape(rawName)
 	if err != nil || filename == "" || strings.Contains(filename, "..") || strings.ContainsAny(filename, "/\\") {
 		http.Error(w, "arquivo inválido", http.StatusBadRequest)
@@ -259,7 +266,8 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := os.Open(fullPath)
 	if err != nil {
-		http.Error(w, "arquivo não encontrado", http.StatusNotFound)
+		log.Printf("[404] arquivo não encontrado: %q (raw: %q)", fullPath, rawName)
+		http.Error(w, "arquivo não encontrado: "+filename, http.StatusNotFound)
 		return
 	}
 	defer f.Close()
