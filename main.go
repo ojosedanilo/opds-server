@@ -120,12 +120,40 @@ func scanBooks() ([]Book, error) {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
-func getBase(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
+// detectScheme determina o esquema (http/https) de forma totalmente automática.
+// Ordem de prioridade:
+//  1. Cabeçalho "Forwarded" (RFC 7239) — padrão moderno
+//  2. "X-Forwarded-Proto" — Cloudflare, nginx, AWS ALB, Traefik…
+//  3. "X-Forwarded-Ssl: on" — alguns proxies mais antigos
+//  4. TLS nativo — quando o Go mesmo termina o TLS
+//  5. Fallback: http
+func detectScheme(r *http.Request) string {
+	// 1. Forwarded: proto=https (RFC 7239)
+	if fwd := r.Header.Get("Forwarded"); fwd != "" {
+		for _, part := range strings.Split(fwd, ";") {
+			part = strings.TrimSpace(part)
+			if strings.HasPrefix(strings.ToLower(part), "proto=") {
+				return strings.TrimPrefix(strings.ToLower(part), "proto=")
+			}
+		}
 	}
-	return scheme + "://" + r.Host
+	// 2. X-Forwarded-Proto (Cloudflare Tunnel, nginx, etc.)
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return strings.ToLower(strings.SplitN(proto, ",", 2)[0])
+	}
+	// 3. X-Forwarded-Ssl: on
+	if r.Header.Get("X-Forwarded-Ssl") == "on" {
+		return "https"
+	}
+	// 4. TLS nativo
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func getBase(r *http.Request) string {
+	return detectScheme(r) + "://" + r.Host
 }
 
 func writeFeed(w http.ResponseWriter, feed Feed) {
@@ -306,6 +334,7 @@ func main() {
 	log.Printf("   Pasta de livros : %s", absDir)
 	log.Printf("   Página web      : http://localhost:%s", port)
 	log.Printf("   Feed OPDS       : http://localhost:%s/opds", port)
+	log.Printf("   (esquema público detectado automaticamente via cabeçalhos de proxy)")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
