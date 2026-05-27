@@ -1,0 +1,37 @@
+# ── Servidor OPDS ──────────────────────────────────────────────────────────────
+
+# Título da biblioteca (aparece no feed OPDS e na página web)
+title: Minha Biblioteca OPDS
+
+# Porta em que o servidor vai escutar
+port: "8020"
+
+# Pasta onde estão os livros (.epub, .pdf, .mobi, .cbz, .cbr)
+books_dir: ./books
+
+# ── CORS ───────────────────────────────────────────────────────────────────────
+# Necessário para clientes web como Readest (web.readest.com), que baixam
+# os arquivos via proxy próprio e precisam de permissão explícita.
+
+cors:
+  enabled: true
+
+  # Origens permitidas.
+  # Use ["*"] para permitir qualquer origem (mais simples, menos seguro).
+  # Liste origens específicas para restringir (recomendado em produção).
+  allowed_origins:
+    - "*"
+  # Exemplo restritivo:
+  # allowed_origins:
+  #   - https://web.readest.com
+  #   - https://app.readest.com
+
+  allowed_methods:
+    - GET
+    - OPTIONS
+    - HEAD
+
+  allowed_headers:
+    - Content-Type
+    - Authorization
+    - Range

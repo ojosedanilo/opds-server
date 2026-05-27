@@ -13,16 +13,75 @@ import (
 	"sort"
 	"strings"
 	"time"
+
 )
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 
-const (
-	serverTitle = "Minha Biblioteca OPDS"
-	serverID    = "urn:uuid:opds-library-server"
-)
+type Config struct {
+	Title    string     `yaml:"title"`
+	Port     string     `yaml:"port"`
+	BooksDir string     `yaml:"books_dir"`
+	CORS     CORSConfig `yaml:"cors"`
+}
 
-var booksDir = "./books"
+type CORSConfig struct {
+	Enabled        bool     `yaml:"enabled"`
+	AllowedOrigins []string `yaml:"allowed_origins"` // ["*"] para todos
+	AllowedMethods []string `yaml:"allowed_methods"`
+	AllowedHeaders []string `yaml:"allowed_headers"`
+}
+
+var cfg Config
+
+func defaultConfig() Config {
+	return Config{
+		Title:    "Minha Biblioteca OPDS",
+		Port:     "8080",
+		BooksDir: "./books",
+		CORS: CORSConfig{
+			Enabled:        true,
+			AllowedOrigins: []string{"*"},
+			AllowedMethods: []string{"GET", "OPTIONS", "HEAD"},
+			AllowedHeaders: []string{"Content-Type", "Authorization", "Range"},
+		},
+	}
+}
+
+
+// ─── CORS middleware ───────────────────────────────────────────────────────────
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !cfg.CORS.Enabled {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		origin := r.Header.Get("Origin")
+		allowedOrigin := ""
+		for _, o := range cfg.CORS.AllowedOrigins {
+			if o == "*" || o == origin {
+				allowedOrigin = o
+				break
+			}
+		}
+		if allowedOrigin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			w.Header().Set("Access-Control-Allow-Methods", strings.Join(cfg.CORS.AllowedMethods, ", "))
+			w.Header().Set("Access-Control-Allow-Headers", strings.Join(cfg.CORS.AllowedHeaders, ", "))
+			w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Disposition")
+		}
+
+		// Preflight OPTIONS — responde direto sem chamar o handler
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
 
 // ─── OPDS / Atom structs ───────────────────────────────────────────────────────
 
@@ -82,7 +141,7 @@ func extensionMime(ext string) string {
 
 func scanBooks() ([]Book, error) {
 	var books []Book
-	entries, err := os.ReadDir(booksDir)
+	entries, err := os.ReadDir(cfg.BooksDir)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao ler pasta de livros: %w", err)
 	}
@@ -104,7 +163,6 @@ func scanBooks() ([]Book, error) {
 		}
 		title := strings.TrimSuffix(name, filepath.Ext(name))
 		title = strings.ReplaceAll(title, "_", " ")
-		title = strings.ReplaceAll(title, "-", " ")
 		books = append(books, Book{
 			Filename: name,
 			Title:    title,
@@ -120,15 +178,14 @@ func scanBooks() ([]Book, error) {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
-// detectScheme determina o esquema (http/https) de forma totalmente automática.
+// detectScheme determina o esquema (http/https) automaticamente.
 // Ordem de prioridade:
-//  1. Cabeçalho "Forwarded" (RFC 7239) — padrão moderno
-//  2. "X-Forwarded-Proto" — Cloudflare, nginx, AWS ALB, Traefik…
-//  3. "X-Forwarded-Ssl: on" — alguns proxies mais antigos
-//  4. TLS nativo — quando o Go mesmo termina o TLS
+//  1. Forwarded: proto=https (RFC 7239)
+//  2. X-Forwarded-Proto (Cloudflare, nginx, AWS ALB, Traefik…)
+//  3. X-Forwarded-Ssl: on
+//  4. TLS nativo
 //  5. Fallback: http
 func detectScheme(r *http.Request) string {
-	// 1. Forwarded: proto=https (RFC 7239)
 	if fwd := r.Header.Get("Forwarded"); fwd != "" {
 		for _, part := range strings.Split(fwd, ";") {
 			part = strings.TrimSpace(part)
@@ -137,15 +194,12 @@ func detectScheme(r *http.Request) string {
 			}
 		}
 	}
-	// 2. X-Forwarded-Proto (Cloudflare Tunnel, nginx, etc.)
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
 		return strings.ToLower(strings.SplitN(proto, ",", 2)[0])
 	}
-	// 3. X-Forwarded-Ssl: on
 	if r.Header.Get("X-Forwarded-Ssl") == "on" {
 		return "https"
 	}
-	// 4. TLS nativo
 	if r.TLS != nil {
 		return "https"
 	}
@@ -182,13 +236,14 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 	base := getBase(r)
 	now := time.Now().UTC().Format(time.RFC3339)
 	feed := Feed{
-		XMLNS: "http://www.w3.org/2005/Atom",
-		DC: "http://purl.org/dc/terms/", OpenSearch: "http://a9.com/-/spec/opensearch/1.1/",
-		OPDS:    "http://opds-spec.org/2010/catalog",
-		ID:      serverID,
-		Title:   serverTitle,
-		Updated: now,
-		Links:   baseLinks(base, base+"/opds", "application/atom+xml;profile=opds-catalog;kind=navigation"),
+		XMLNS:      "http://www.w3.org/2005/Atom",
+		DC:         "http://purl.org/dc/terms/",
+		OpenSearch: "http://a9.com/-/spec/opensearch/1.1/",
+		OPDS:       "http://opds-spec.org/2010/catalog",
+		ID:         "urn:uuid:opds-library-server",
+		Title:      cfg.Title,
+		Updated:    now,
+		Links:      baseLinks(base, base+"/opds", "application/atom+xml;profile=opds-catalog;kind=navigation"),
 		Entries: []Entry{{
 			Title:   "Todos os Livros",
 			ID:      "urn:opds:all",
@@ -224,41 +279,45 @@ func handleBooksList(w http.ResponseWriter, r *http.Request, query string) {
 			}},
 		})
 	}
-	title := serverTitle + " – Todos os Livros"
+	title := cfg.Title + " – Todos os Livros"
 	selfHref := base + "/opds/books"
 	if query != "" {
 		title = "Resultados para: " + query
 		selfHref = base + "/opds/search?q=" + url.QueryEscape(query)
 	}
 	feed := Feed{
-		XMLNS: "http://www.w3.org/2005/Atom",
-		DC: "http://purl.org/dc/terms/", OpenSearch: "http://a9.com/-/spec/opensearch/1.1/",
-		OPDS:    "http://opds-spec.org/2010/catalog",
-		ID:      "urn:opds:books",
-		Title:   title,
-		Updated: now,
-		Links:   append(baseLinks(base, selfHref, "application/atom+xml;profile=opds-catalog;kind=acquisition"), Link{Rel: "up", Href: base + "/opds", Type: "application/atom+xml;profile=opds-catalog;kind=navigation"}),
-		Entries: entries,
+		XMLNS:      "http://www.w3.org/2005/Atom",
+		DC:         "http://purl.org/dc/terms/",
+		OpenSearch: "http://a9.com/-/spec/opensearch/1.1/",
+		OPDS:       "http://opds-spec.org/2010/catalog",
+		ID:         "urn:opds:books",
+		Title:      title,
+		Updated:    now,
+		Links:      append(baseLinks(base, selfHref, "application/atom+xml;profile=opds-catalog;kind=acquisition"), Link{Rel: "up", Href: base + "/opds", Type: "application/atom+xml;profile=opds-catalog;kind=navigation"}),
+		Entries:    entries,
 	}
 	writeFeed(w, feed)
 }
 
 func handleDownload(w http.ResponseWriter, r *http.Request) {
-	// Usa RawPath quando disponível para evitar dupla-decodificação de caracteres
-	// como %C3%A7 (ç), %20 (espaço), etc. O proxy do Readest repassa a URL
-	// encoded — se usarmos r.URL.Path o Go já terá decodificado uma vez.
+	// Usa RawPath para evitar dupla-decodificação (o proxy do Readest repassa
+	// a URL ainda encoded; r.URL.Path já estaria decodificado pelo Go).
 	rawPath := r.URL.RawPath
 	if rawPath == "" {
 		rawPath = r.URL.Path
 	}
 	rawName := strings.TrimPrefix(rawPath, "/books/")
-	filename, err := url.PathUnescape(rawName)
+	// O proxy do Readest envia espaços como "+" (query-string encoding) em vez
+	// de "%20" (path encoding). url.PathUnescape não converte "+", então
+	// normalizamos para %20 antes de decodificar.
+	normalizedName := strings.ReplaceAll(rawName, "+", "%20")
+	filename, err := url.PathUnescape(normalizedName)
 	if err != nil || filename == "" || strings.Contains(filename, "..") || strings.ContainsAny(filename, "/\\") {
 		http.Error(w, "arquivo inválido", http.StatusBadRequest)
 		return
 	}
-	fullPath := filepath.Join(booksDir, filename)
-	absBooks, _ := filepath.Abs(booksDir)
+	fullPath := filepath.Join(cfg.BooksDir, filename)
+	absBooks, _ := filepath.Abs(cfg.BooksDir)
 	absFile, _ := filepath.Abs(fullPath)
 	if !strings.HasPrefix(absFile, absBooks+string(os.PathSeparator)) {
 		http.Error(w, "acesso negado", http.StatusForbidden)
@@ -271,12 +330,11 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+
 	mtype := extensionMime(strings.ToLower(filepath.Ext(filename)))
 	w.Header().Set("Content-Type", mtype)
 
-	// Content-Disposition com RFC 5987 (UTF-8 percent-encoded).
-	// filename= recebe nome ASCII (fallback); filename*= o nome real com acentos/espaços.
-	// Isso previne a extensão duplicada (.epub.epub) e problemas com espaços.
+	// Content-Disposition RFC 5987: filename= ASCII fallback + filename*= UTF-8
 	asciiName := strings.ReplaceAll(filename, " ", "_")
 	encodedName := "UTF-8''" + url.PathEscape(filename)
 	w.Header().Set("Content-Disposition",
@@ -298,6 +356,10 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	var sb strings.Builder
 	for _, b := range books {
 		sb.WriteString(fmt.Sprintf("  <li>%s <small>(%s)</small></li>\n", b.Title, filepath.Ext(b.Filename)))
+	}
+	corsStatus := "desativado"
+	if cfg.CORS.Enabled {
+		corsStatus = "ativado (" + strings.Join(cfg.CORS.AllowedOrigins, ", ") + ")"
 	}
 	fmt.Fprintf(w, `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -324,33 +386,70 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
   <div class="endpoint"><a href="%s/opds">%s/opds</a></div>
   <h2>Livros disponíveis</h2>
   <ul>%s</ul>
-  <p class="footer">Pasta: <code>%s</code></p>
+  <p class="footer">Pasta: <code>%s</code> &nbsp;|&nbsp; CORS: %s</p>
 </div>
-</body></html>`, serverTitle, serverTitle, len(books), base, base, sb.String(), booksDir)
+</body></html>`, cfg.Title, cfg.Title, len(books), base, base, sb.String(), cfg.BooksDir, corsStatus)
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────────
 
-func main() {
-	port := "8080"
-	args := os.Args[1:]
-	if len(args) >= 1 {
-		port = args[0]
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
 	}
-	if len(args) >= 2 {
-		booksDir = args[1]
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func main() {
+	// Determina caminho do config.yml (argumento ou padrão)
+	configPath := "config.yml"
+	// Aceita:
+	//   ./opds-server                     → usa ./config.yml
+	//   ./opds-server outro.yml           → caminho explícito
+	//   ./opds-server --config outro.yml  → idem, forma longa
+	//
+	// Argumentos que parecem porta (só dígitos) são ignorados com aviso,
+	// pois a porta agora é definida no config.yml.
+	args := os.Args[1:]
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--config" || a == "-config":
+			if i+1 < len(args) {
+				configPath = args[i+1]
+				i++
+			}
+		case isAllDigits(a):
+			log.Printf("aviso: %q ignorado — a porta agora fica no config.yml (campo \"port\")", a)
+		case !strings.HasPrefix(a, "-"):
+			configPath = a
+		}
 	}
 
-	if err := os.MkdirAll(booksDir, 0755); err != nil {
+	cfg = loadConfig(configPath)
+
+	if err := os.MkdirAll(cfg.BooksDir, 0755); err != nil {
 		log.Fatalf("Não foi possível criar pasta de livros: %v", err)
 	}
-	absDir, _ := filepath.Abs(booksDir)
+	absDir, _ := filepath.Abs(cfg.BooksDir)
+
+	corsStr := "desativado"
+	if cfg.CORS.Enabled {
+		corsStr = "origens=" + strings.Join(cfg.CORS.AllowedOrigins, ",")
+	}
 
 	log.Printf("📚 Servidor OPDS iniciando...")
+	log.Printf("   Config          : %s", configPath)
+	log.Printf("   Título          : %s", cfg.Title)
 	log.Printf("   Pasta de livros : %s", absDir)
-	log.Printf("   Página web      : http://localhost:%s", port)
-	log.Printf("   Feed OPDS       : http://localhost:%s/opds", port)
-	log.Printf("   (esquema público detectado automaticamente via cabeçalhos de proxy)")
+	log.Printf("   Porta           : %s", cfg.Port)
+	log.Printf("   CORS            : %s", corsStr)
+	log.Printf("   Feed OPDS       : http://localhost:%s/opds", cfg.Port)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
@@ -364,7 +463,9 @@ func main() {
 	})
 	mux.HandleFunc("/books/", handleDownload)
 
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	handler := corsMiddleware(mux)
+
+	if err := http.ListenAndServe(":"+cfg.Port, handler); err != nil {
 		log.Fatal(err)
 	}
 }
