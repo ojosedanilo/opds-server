@@ -265,7 +265,15 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	mtype := extensionMime(strings.ToLower(filepath.Ext(filename)))
 	w.Header().Set("Content-Type", mtype)
-	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+
+	// Content-Disposition com RFC 5987 (UTF-8 percent-encoded).
+	// filename= recebe nome ASCII (fallback); filename*= o nome real com acentos/espaços.
+	// Isso previne a extensão duplicada (.epub.epub) e problemas com espaços.
+	asciiName := strings.ReplaceAll(filename, " ", "_")
+	encodedName := "UTF-8''" + url.PathEscape(filename)
+	w.Header().Set("Content-Disposition",
+		fmt.Sprintf(`attachment; filename="%s"; filename*=%s`, asciiName, encodedName))
+
 	if info, err := f.Stat(); err == nil {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
 	}
